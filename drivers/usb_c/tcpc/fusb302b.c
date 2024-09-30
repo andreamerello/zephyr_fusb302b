@@ -19,10 +19,16 @@ static const uint8_t REG_MEASURE = 0x04;
 static const uint8_t REG_CONTROL0 = 0x06;
 static const uint8_t REG_CONTROL1 = 0x07;
 static const uint8_t REG_CONTROL3 = 0x09;
+static const uint8_t REG_MASK = 0x0a;
 static const uint8_t REG_POWER = 0x0b;
 static const uint8_t REG_RESET = 0x0c;
+static const uint8_t REG_MASKA = 0x0e;
+static const uint8_t REG_MASKB = 0x0f;
+static const uint8_t REG_INTERRUPTA = 0x3e;
+static const uint8_t REG_INTERRUPTB = 0x3f;
 static const uint8_t REG_STATUS0 = 0x40;
 static const uint8_t REG_STATUS1 = 0x41;
+static const uint8_t REG_INTERRUPT = 0x42;
 static const uint8_t REG_FIFO = 0x43;
 
 static const uint8_t TX_TOKEN_TXON = 0xA1;
@@ -269,9 +275,97 @@ int fusb302_setup(const struct device *dev) {
 	return 0;
 }
 
+
+static void fusb302b_irq_work(struct k_work *work)
+{
+	struct fusb302b_data *data = CONTAINER_OF(work, struct fusb302b_data, irq_work);
+	const struct fusb302b_cfg *cfg = data->dev->config;
+	uint8_t dummy;
+
+	int ret = i2c_reg_read_byte_dt(&cfg->i2c, REG_INTERRUPTB, &dummy);
+	if (!dummy)
+		LOG_ERR("Spurious IRQ");
+
+	if (ret < 0) {
+		LOG_ERR("Failure to clear IRQ; not re-enabling IRQs: %d", ret);
+		return;
+	}
+
+#if 0
+	ret = gpio_pin_interrupt_configure_dt(&cfg->gpio_irq, GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret < 0) {
+		LOG_ERR("Re-enabling gpio interrupt failed: %d", ret);
+		return;
+	}
+#endif
+}
+
+static void fusb302b_isr(const struct device *dev, struct gpio_callback *cb,
+			 uint32_t pins)
+{
+	ARG_UNUSED(pins);
+	LOG_DBG("IRQ");
+	struct fusb302b_data *data =
+		CONTAINER_OF(cb, struct fusb302b_data, gpio_cb);
+#if 0
+	ret = gpio_pin_interrupt_configure_dt(&cfg->gpio_irq, GPIO_INT_DISABLE);
+	if (ret < 0) {
+		LOG_ERR("Disabling gpio interrupt failed: %d", ret);
+		return;
+	}
+#endif
+	atomic_set(&data->data_avail, 1);
+	data->alert_info.handler(data->dev, data->alert_info.data, TCPC_ALERT_MSG_STATUS);
+
+	k_work_submit(&data->irq_work);
+}
+
+static int fusb302b_config_irq(const struct device *dev)
+{
+	const struct fusb302b_cfg *cfg = dev->config;
+	struct fusb302b_data *data = dev->data;
+	uint8_t dummy;
+	int ret;
+
+	if (!gpio_is_ready_dt(&cfg->gpio_irq)) {
+		LOG_ERR("gpio IRQ not ready");
+		return -ENODEV;
+	}
+
+	data->irq_work.handler = fusb302b_irq_work;
+	gpio_pin_configure_dt(&cfg->gpio_irq, GPIO_INPUT);
+	gpio_init_callback(&data->gpio_cb, fusb302b_isr, BIT(cfg->gpio_irq.pin));
+	ret = gpio_add_callback(cfg->gpio_irq.port, &data->gpio_cb);
+
+	if (ret < 0) {
+		LOG_ERR("Failed to set gpio callback");
+		return ret;
+	}
+
+	LOG_INF("Enabling RX interrupt");
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_MASK, 0xff);
+	if (ret != 0) { return -EIO; }
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_MASKA, 0xff);
+	if (ret != 0) { return -EIO; }
+
+	ret = i2c_reg_read_byte_dt(&cfg->i2c, REG_INTERRUPT, &dummy);
+	if (ret != 0) { return -EIO; }
+	ret = i2c_reg_read_byte_dt(&cfg->i2c, REG_INTERRUPTA, &dummy);
+	if (ret != 0) { return -EIO; }
+	ret = i2c_reg_read_byte_dt(&cfg->i2c, REG_INTERRUPTB, &dummy);
+	if (ret != 0) { return -EIO; }
+
+	ret = gpio_pin_interrupt_configure_dt(&cfg->gpio_irq, GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret != 0) { return -EIO; }
+
+	return i2c_reg_write_byte_dt(&cfg->i2c, REG_MASKB, 0);
+}
+
 int fusb302b_init(const struct device *dev) {
 	LOG_INF("Init");
 	const struct fusb302b_cfg *cfg = dev->config;
+	struct fusb302b_data *data = dev->data;
+	data->dev = dev;
 
 	if (!i2c_is_ready_dt(&cfg->i2c)) {
 		LOG_ERR("I2C driver not ready");
@@ -289,25 +383,29 @@ int fusb302b_init(const struct device *dev) {
 		return -EIO;
 	}
 
-	int res = 0;
-
 	/* Power up all parts of device */
 	LOG_INF("Power up");
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_POWER, 0b00001111);
-	if (res != 0) {
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_POWER, 0b00001111);
+	if (ret != 0) {
 		LOG_ERR("Error during powerup");
 		return -EIO;
 	}
 
-	/* Unmask interrupts */
-	LOG_INF("Enabling interrupts");
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_CONTROL0, 0b00000000);
-	if (res != 0) { return -EIO; }
+	data->data_avail = ATOMIC_INIT(0);
+	ret = fusb302b_config_irq(dev);
+	if (ret < 0) {
+		LOG_ERR("Failed to enable interrupt");
+		return ret;
+	}
+	if (ret != 0) { return -EIO; }
+
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_CONTROL0, 0b00000000);
+	if (ret != 0) { return -EIO; }
 
 	/* Enable packet retries */
 	LOG_INF("Enabling retries");
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_CONTROL3, 0b00000111);
-	if (res != 0) { return -EIO; }
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_CONTROL3, 0b00000111);
+	if (ret != 0) { return -EIO; }
 
 	LOG_INF("Init done");
 	return 0;
@@ -430,11 +528,17 @@ static int fusb302b_get_rx_pending_msg(const struct device *dev, struct pd_msg *
 	int res = 0;
 	uint8_t status1;
 
+	if (!atomic_get(&data->data_avail))
+		return -ENODATA;
+
 	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_STATUS1, &status1);
 	if (res != 0) { return -EIO; }
 	bool rx_empty = (status1 & 0b100000) != 0;
 
-	if (rx_empty) { return -ENODATA; }
+	if (rx_empty) {
+		atomic_set(&data->data_avail, 0);
+		return -ENODATA;
+	};
 
 	if (buf == NULL) {
 		// Message is pending and buf parameter is NULL
@@ -644,13 +748,16 @@ static const struct tcpc_driver_api fusb302b_tcpc_driver_api = {
 		.set_alert_handler_cb = fusb302b_set_alert_handler_cb,
 };
 
-#define FUSB302B_DEFINE(inst)                                                                                          \
-	static struct fusb302b_data fusb302b_data_##inst = {0};                                                            \
-	static const struct fusb302b_cfg fusb302b_config_##inst = {                                                        \
-			.i2c = I2C_DT_SPEC_INST_GET(inst),                                                                         \
-	};                                                                                                                 \
-	DEVICE_DT_INST_DEFINE(inst, fusb302b_init, /* pm_device = */ NULL, &fusb302b_data_##inst, &fusb302b_config_##inst, \
-						  /* level = */ POST_KERNEL, CONFIG_USBC_TCPC_INIT_PRIORITY, &fusb302b_tcpc_driver_api);
+#define FUSB302B_DEFINE(inst)                                                            \
+	static struct fusb302b_data fusb302b_data_##inst = {0};                          \
+	static const struct fusb302b_cfg fusb302b_config_##inst = {                      \
+			.i2c = I2C_DT_SPEC_INST_GET(inst),                               \
+			.gpio_irq = GPIO_DT_SPEC_INST_GET(inst, int_gpios),      \
+	};                                                                               \
+	DEVICE_DT_INST_DEFINE(inst, fusb302b_init, /* pm_device = */                     \
+			      NULL, &fusb302b_data_##inst, &fusb302b_config_##inst,      \
+			      /* level = */ POST_KERNEL, CONFIG_USBC_TCPC_INIT_PRIORITY, \
+		              &fusb302b_tcpc_driver_api);
 
 BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) > 0, "No compatible FUSB302B instance found");
 
