@@ -596,7 +596,7 @@ int fusb302b_transmit_data(const struct device *dev, struct pd_msg *msg) {
 			res = transmit_hard_reset(cfg);
 			break;
 		default:
-			LOG_ERR("Packet type %s not supported", pd_packet_type_to_str(msg->type));
+			LOG_ERR("Packet type not supported");
 			res = -1;
 			break;
 	}
