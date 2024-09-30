@@ -6,3 +6,11 @@ description: FUSB302B Programmable USB Type-C Controller with PD
 compatible: "fcs,fusb302b"
 
 include: i2c-device.yaml
+
+properties:
+  int-gpios:
+    type: phandle-array
+    description: |
+      The INT signal default configuration is active-high.  The
+      property value should ensure the flags properly describe the
+      signal that is presented to the driver.

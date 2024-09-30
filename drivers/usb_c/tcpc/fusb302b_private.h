@@ -9,6 +9,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/usb_c/usbc_tcpc.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/kernel.h>
 
 #define FUSB302_RX_BUFFER_SIZE 80
 
@@ -18,12 +19,17 @@ struct alert_info {
 };
 
 struct fusb302b_data {
+	const struct device *dev;
 	struct alert_info alert_info;
+	struct gpio_callback gpio_cb;
+	struct k_work irq_work;
 	int cc;
+	atomic_t data_avail;
 };
 
 struct fusb302b_cfg {
 	struct i2c_dt_spec i2c;
+	struct gpio_dt_spec gpio_irq;
 };
 
 int fusb302b_init(const struct device *dev);
