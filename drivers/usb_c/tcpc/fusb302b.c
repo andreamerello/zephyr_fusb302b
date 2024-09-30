@@ -214,6 +214,23 @@ int fusb302_reset(const struct device *dev) {
 enum cc_res { CC_RES_1, CC_RES_2, CC_RES_BOTH, CC_RES_NONE };
 
 static int get_cc_line(const struct fusb302b_cfg *cfg, enum cc_res *out) {
+	/*
+	  Rd value is fixed at 5.1 kΩ.
+
+	  Rp 36K 500ma PUP
+	  Rp 22K 1.5A  PUP
+	  Rp 10K 3.0A  PUP
+
+	  Ra 800 - 1K PDN
+	*/
+
+
+	/*  With PDN enabled on this side:
+	    00: < 200 mV          : vRa or Open
+	    01: >200 mV, <660 mV  : vRd-USB
+	    10: >660 mV, <1.23 V  : vRd-1.5
+	    11: >1.23 V           : vRd-3.0
+	*/
 	/* Connect ADC to CC1 (set MEAS_CC1) */
 	int res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0b00000111);
 
