@@ -623,21 +623,23 @@ static int fusb302b_get_rx_pending_msg(const struct device *dev, struct pd_msg *
 		LOG_INF("Received GoodCRC, sending TCPC_ALERT_TRANSMIT_MSG_SUCCESS");
 		data->alert_info.handler(dev, data->alert_info.data, TCPC_ALERT_TRANSMIT_MSG_SUCCESS);
 	}
-
 	return buf->len + 2 /* header */;
 }
 
 int fusb302b_set_cc_polarity(const struct device *dev, enum tc_cc_polarity polarity) {
 	const struct fusb302b_cfg *cfg = dev->config;
+
 	/* Enable transmit driver for proper CC line */
-	uint8_t cc_select = (polarity == TC_POLARITY_CC1) ? 0b01 : 0b10;
+	/* no vCONN from sink device */
+	//uint8_t cc_vconn_rx = (polarity == TC_POLARITY_CC1) ? 0b100100 : 0b11000;
+	uint8_t reg;
+	uint8_t cc_io = (polarity == TC_POLARITY_CC1) ? 0b01 : 0b10;
+	LOG_INF("Setting CC IO %d", cc_io);
 
-	LOG_INF("Setting CC polarity to %d", cc_select);
-	int res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES1, 0b00100100 | cc_select);
-
+	int res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES1, &reg);
 	if (res != 0) { return -EIO; }
-
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0b00000011 | (cc_select << 2));
+	reg &= ~0b11;
+	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES1, reg | cc_io);
 	if (res != 0) { return -EIO; }
 
 	// Flush TX buffer
@@ -650,6 +652,26 @@ int fusb302b_set_cc_polarity(const struct device *dev, enum tc_cc_polarity polar
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_RESET, 0x02);
 	if (res != 0) { return -EIO; }
 	return 0;
+}
+
+int fusb302b_rx_enable(const struct device *dev, bool enable)
+{
+	uint8_t reg;
+	const struct fusb302b_cfg *cfg = dev->config;
+	struct fusb302b_data *data = dev->data;
+
+	LOG_INF("RX enable: %d", enable);
+	// Flush RX buffer
+	int res = i2c_reg_write_byte_dt(&cfg->i2c, REG_CONTROL1, 0x04);
+	if (res != 0) { return -EIO; }
+
+	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES1, &reg);
+	if (res != 0) { return -EIO; }
+	reg &= 0b10011011;
+	reg |= 0b00100000;
+	if (enable)
+		reg |= 0b100;
+	return i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES1, reg);
 }
 
 int fusb302b_set_alert_handler_cb(const struct device *dev, tcpc_alert_handler_cb_t handler, void *alert_data) {
@@ -741,7 +763,7 @@ static const struct tcpc_driver_api fusb302b_tcpc_driver_api = {
 		.set_vconn = NULL,
 		.set_roles = NULL,
 		.get_rx_pending_msg = fusb302b_get_rx_pending_msg,
-		.set_rx_enable = NULL,
+		.set_rx_enable = fusb302b_rx_enable,
 		.set_cc_polarity = fusb302b_set_cc_polarity,
 		.transmit_data = fusb302b_transmit_data,
 		.dump_std_reg = NULL,
