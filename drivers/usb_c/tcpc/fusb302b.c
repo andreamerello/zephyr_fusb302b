@@ -205,7 +205,7 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 }
 
 int fusb302_reset(const struct device *dev) {
-	LOG_INF("Resetting");
+	LOG_DBG("Resetting");
 	const struct fusb302b_cfg *cfg = dev->config;
 	/* SW_RES: "Reset the FUSB302B including the I2C registers to their default values" */
 	return i2c_reg_write_byte_dt(&cfg->i2c, REG_RESET, 0b00000001);
@@ -253,12 +253,12 @@ static int get_cc_line(const struct fusb302b_cfg *cfg, enum cc_res *out) {
 }
 
 int fusb302_setup(const struct device *dev) {
-	LOG_INF("Running setup");
+	LOG_DBG("Running setup");
 	const struct fusb302b_cfg *cfg = dev->config;
 	struct fusb302b_data *data = dev->data;
 	data->cc = 0;
 
-	LOG_INF("Flushing TX and RX buffers");
+	LOG_DBG("Flushing TX and RX buffers");
 	/* Flush TX buffer (TX_FLUSH) */
 	int res = i2c_reg_write_byte_dt(&cfg->i2c, REG_CONTROL0, 0b01000000);
 
@@ -267,11 +267,11 @@ int fusb302_setup(const struct device *dev) {
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_CONTROL1, 0b00000100);
 	if (res != 0) { return -EIO; }
 	/* Reset PD logic */
-	LOG_INF("Resetting PD logic");
+	LOG_DBG("Resetting PD logic");
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_RESET, 0b00000010);
 	if (res != 0) { return -EIO; }
 
-	LOG_INF("Setup complete");
+	LOG_DBG("Setup complete");
 	return 0;
 }
 
@@ -354,7 +354,7 @@ static int fusb302b_config_irq(const struct device *dev)
 }
 
 int fusb302b_init(const struct device *dev) {
-	LOG_INF("Init");
+	LOG_DBG("Init");
 	const struct fusb302b_cfg *cfg = dev->config;
 	struct fusb302b_data *data = dev->data;
 	data->dev = dev;
@@ -376,7 +376,7 @@ int fusb302b_init(const struct device *dev) {
 	}
 
 	/* Power up all parts of device */
-	LOG_INF("Power up");
+	LOG_DBG("Power up");
 	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_POWER, 0b00001111);
 	if (ret != 0) {
 		LOG_ERR("Error during powerup");
@@ -395,11 +395,11 @@ int fusb302b_init(const struct device *dev) {
 	if (ret != 0) { return -EIO; }
 
 	/* Enable packet retries */
-	LOG_INF("Enabling retries");
+	LOG_DBG("Enabling retries");
 	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_CONTROL3, 0b00000111);
 	if (ret != 0) { return -EIO; }
 
-	LOG_INF("Init done");
+	LOG_DBG("Init done");
 	return 0;
 }
 
@@ -420,7 +420,7 @@ static const char *cc_pull_to_str(enum tc_cc_pull cc_pull) {
 }
 
 static int fusb302b_set_cc(const struct device *dev, enum tc_cc_pull cc_pull) {
-	LOG_INF("Setting both CC to %s", cc_pull_to_str(cc_pull));
+	LOG_DBG("Setting both CC to %s", cc_pull_to_str(cc_pull));
 
 	const struct fusb302b_cfg *cfg = dev->config;
 
@@ -472,7 +472,7 @@ static int fusb302b_get_cc(const struct device *dev, enum tc_cc_voltage_state *c
 	if (data->cc != 0) {
 		cc = data->cc == 1 ? CC_RES_1 : CC_RES_2;
 	} else {
-		LOG_INF("Measuring CC");
+		LOG_DBG("Measuring CC");
 		int res = get_cc_line(cfg, &cc);
 		if (res != 0) { return -EIO; }
 	}
@@ -595,7 +595,7 @@ static int fusb302b_get_rx_pending_msg(const struct device *dev, struct pd_msg *
 	if (res != 0) { return -EIO; }
 
 	if (buf->len == 0 && buf->header.message_type == PD_CTRL_GOOD_CRC) {
-		LOG_INF("Received GoodCRC, sending TCPC_ALERT_TRANSMIT_MSG_SUCCESS");
+		LOG_DBG("Received GoodCRC, sending TCPC_ALERT_TRANSMIT_MSG_SUCCESS");
 		data->alert_info.handler(dev, data->alert_info.data, TCPC_ALERT_TRANSMIT_MSG_SUCCESS);
 	}
 
@@ -680,7 +680,7 @@ int fusb302b_transmit_data(const struct device *dev, struct pd_msg *msg) {
 	const struct fusb302b_cfg *cfg = dev->config;
 	const struct fusb302b_data *data = dev->data;
 
-	LOG_INF("Transmitting packet of type %d with length %d and id %d", msg->type, msg->len, msg->header.message_id);
+	LOG_DBG("Transmitting packet of type %d with length %d and id %d", msg->type, msg->len, msg->header.message_id);
 
 	int res = 0;
 
