@@ -313,6 +313,16 @@ static int fusb302b_config_irq(const struct device *dev)
 	uint8_t dummy;
 	int ret;
 
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_MASK, 0xff);
+	if (ret != 0) { return -EIO; }
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_MASKA, 0xff);
+	if (ret != 0) { return -EIO; }
+
+	if (!cfg->gpio_irq.port) {
+		LOG_INF("No IRQ pin defined; disabling IRQs");
+		return i2c_reg_write_byte_dt(&cfg->i2c, REG_MASKB, 0xff);
+	}
+
 	if (!gpio_is_ready_dt(&cfg->gpio_irq)) {
 		LOG_ERR("gpio IRQ not ready");
 		return -ENODEV;
@@ -329,10 +339,6 @@ static int fusb302b_config_irq(const struct device *dev)
 	}
 
 	LOG_INF("Enabling RX interrupt");
-	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_MASK, 0xff);
-	if (ret != 0) { return -EIO; }
-	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_MASKA, 0xff);
-	if (ret != 0) { return -EIO; }
 
 	ret = i2c_reg_read_byte_dt(&cfg->i2c, REG_INTERRUPT, &dummy);
 	if (ret != 0) { return -EIO; }
@@ -514,7 +520,7 @@ static int fusb302b_get_rx_pending_msg(const struct device *dev, struct pd_msg *
 	int res = 0;
 	uint8_t status1;
 
-	if (!atomic_get(&data->data_avail))
+	if (cfg->gpio_irq.port && !atomic_get(&data->data_avail))
 		return -ENODATA;
 
 	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_STATUS1, &status1);
@@ -738,7 +744,7 @@ static const struct tcpc_driver_api fusb302b_tcpc_driver_api = {
 	static struct fusb302b_data fusb302b_data_##inst = {0};                          \
 	static const struct fusb302b_cfg fusb302b_config_##inst = {                      \
 			.i2c = I2C_DT_SPEC_INST_GET(inst),                               \
-			.gpio_irq = GPIO_DT_SPEC_INST_GET(inst, int_gpios),      \
+			.gpio_irq = GPIO_DT_SPEC_INST_GET_OR(inst, int_gpios, {0}), 	 \
 	};                                                                               \
 	DEVICE_DT_INST_DEFINE(inst, fusb302b_init, /* pm_device = */                     \
 			      NULL, &fusb302b_data_##inst, &fusb302b_config_##inst,      \
