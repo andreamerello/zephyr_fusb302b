@@ -10,7 +10,7 @@
 #include <zephyr/drivers/usb_c/usbc_tcpc.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(fusb302b, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(fusb302b, LOG_LEVEL_WRN);
 
 static const uint8_t REG_DEVICE_ID = 0x01;
 static const uint8_t REG_SWITCHES0 = 0x02;
