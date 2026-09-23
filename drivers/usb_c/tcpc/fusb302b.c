@@ -130,7 +130,7 @@ static int vbus_above(const struct fusb302b_cfg *cfg, uint8_t level, bool *above
 
 	if (res != 0) {
 		LOG_ERR("Error setting DAC to measure VBUS: %d", res);
-		return res;
+		goto restore_measure;
 	}
 
 	k_usleep(350);
@@ -143,6 +143,7 @@ static int vbus_above(const struct fusb302b_cfg *cfg, uint8_t level, bool *above
 		LOG_DBG("VBUS %c%d mV", *above ? '>' : '<', vbus_level_to_mv(level));
 	}
 
+restore_measure:
 	restore_res = i2c_reg_write_byte_dt(&cfg->i2c, REG_MEASURE, measure);
 	if (restore_res != 0) {
 		LOG_ERR("Error restoring measure register: %d", restore_res);
