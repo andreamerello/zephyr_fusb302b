@@ -612,9 +612,14 @@ static int fusb302b_get_rx_pending_msg(const struct device *dev, struct pd_msg *
 
 	int res = 0;
 	uint8_t status1;
+	uint8_t prefix[3];
+	uint8_t sop_token;
+	uint8_t data_crc[sizeof(buf->data) + 4];
 
-	if (cfg->gpio_irq.port && !atomic_get(&data->data_avail))
-		return -ENODATA;
+	if (cfg->gpio_irq.port) {
+		if (!atomic_get(&data->data_avail))
+			return -ENODATA;
+	}
 
 	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_STATUS1, &status1);
 	if (res != 0) { return -EIO; }
@@ -630,13 +635,13 @@ static int fusb302b_get_rx_pending_msg(const struct device *dev, struct pd_msg *
 		return 0;
 	}
 
-	uint8_t sop_token;
-
-	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_FIFO, &sop_token);
+	res = i2c_burst_read_dt(&cfg->i2c, REG_FIFO, prefix, sizeof(prefix));
 	if (res != 0) {
-		LOG_ERR("Error while reading SOP token from FIFO");
+		LOG_ERR("Error while reading FIFO prefix");
 		return -EIO;
 	}
+
+	sop_token = prefix[0];
 	LOG_DBG("SOP token %#04x", sop_token);
 	/* First byte determines package type */
 	switch (sop_token >> 5) {
@@ -664,32 +669,21 @@ static int fusb302b_get_rx_pending_msg(const struct device *dev, struct pd_msg *
 			LOG_ERR("Read unknown start-token from RxFIFO: %#04x", sop_token);
 			return -EIO;
 	}
-	uint8_t header[2];
-
-	res = i2c_burst_read_dt(&cfg->i2c, REG_FIFO, header, 2);
-	if (res != 0) {
-		LOG_ERR("Error while reading from fifo");
-		return -EIO;
-	}
-	buf->header.raw_value = header[0] | (header[1] << 8);
-	LOG_HEXDUMP_DBG(header, sizeof(header), "RX header:");
+	buf->header.raw_value = prefix[1] | (prefix[2] << 8);
+	LOG_HEXDUMP_DBG(&prefix[1], 2, "RX header:");
 
 	buf->len = PD_CONVERT_PD_HEADER_COUNT_TO_BYTES(buf->header.number_of_data_objects);
 	__ASSERT(buf->len <= sizeof(buf->data), "Packet size of %d is larger than buffer of size %d", buf->len,
 			 sizeof(buf->data));
 	__ASSERT(buf->len <= (FUSB302_RX_BUFFER_SIZE - 3), "Packet size of %d is larger than FUSB302B RxFIFO", buf->len);
 	LOG_DBG("Reading %d data bytes", buf->len);
+
+	res = i2c_burst_read_dt(&cfg->i2c, REG_FIFO, data_crc, buf->len + 4);
+	if (res != 0) { return -EIO; }
 	if (buf->len > 0) {
-		res = i2c_burst_read_dt(&cfg->i2c, REG_FIFO, buf->data, buf->len);
-		if (res != 0) { return -EIO; }
+		memcpy(buf->data, data_crc, buf->len);
 		LOG_HEXDUMP_DBG(buf->data, buf->len, "RX data:");
 	}
-
-	/* Read CRC */
-	uint8_t crc[4];
-
-	res = i2c_burst_read_dt(&cfg->i2c, REG_FIFO, crc, 4);
-	if (res != 0) { return -EIO; }
 
 	if (buf->len == 0 && buf->header.message_type == PD_CTRL_GOOD_CRC) {
 		LOG_DBG("Received GoodCRC, sending TCPC_ALERT_TRANSMIT_MSG_SUCCESS");
