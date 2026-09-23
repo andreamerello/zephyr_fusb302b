@@ -114,41 +114,58 @@ int fusb302b_verify(const struct device *dev) {
 
 static int vbus_level_to_mv(uint8_t level) { return (level + 1) * 420; }
 
-static bool vbus_above(const struct fusb302b_cfg *cfg, uint8_t level) {
+static int vbus_above(const struct fusb302b_cfg *cfg, uint8_t level, bool *above) {
 	uint8_t measure = 0;
+	uint8_t status0 = 0;
+	int restore_res;
 	int res = i2c_reg_read_byte_dt(&cfg->i2c, REG_MEASURE, &measure);
 
-	if (res != 0) { LOG_ERR("Error reading measure register"); }
+	if (res != 0) {
+		LOG_ERR("Error reading measure register: %d", res);
+		return res;
+	}
 
 	/* Set MEAS_VBUS to 1, to measure VBUS with the MDAC/comparator */
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_MEASURE, 0b01000000 | (level & 0b111111));
 
-	if (res != 0) { LOG_ERR("Error setting DAC to measure VBUS: %d", res); }
-	uint8_t status0 = 0;
+	if (res != 0) {
+		LOG_ERR("Error setting DAC to measure VBUS: %d", res);
+		return res;
+	}
 
 	k_usleep(350);
 
 	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_STATUS0, &status0);
-	if (res != 0) { LOG_ERR("Error getting comparison to measure VBUS: %d", res); }
-	bool above = (status0 & 0b00100000) != 0;
+	if (res != 0) {
+		LOG_ERR("Error getting comparison to measure VBUS: %d", res);
+	} else {
+		*above = (status0 & 0b00100000) != 0;
+		LOG_DBG("VBUS %c%d mV", *above ? '>' : '<', vbus_level_to_mv(level));
+	}
 
-	LOG_DBG("VBUS %c%d mV", above ? '>' : '<', vbus_level_to_mv(level));
-
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_MEASURE, measure);
-	if (res != 0) { LOG_ERR("Error writing measure register"); }
-	return above;
+	restore_res = i2c_reg_write_byte_dt(&cfg->i2c, REG_MEASURE, measure);
+	if (restore_res != 0) {
+		LOG_ERR("Error restoring measure register: %d", restore_res);
+		if (res == 0) { res = restore_res; }
+	}
+	return res;
 }
 
 bool fusb302_check_vbus_level(const struct device *dev, enum tc_vbus_level level) {
 	const struct fusb302b_cfg *cfg = dev->config;
+	bool above;
+	int res;
 
 	switch (level) {
 		case TC_VBUS_SAFE0V:
-			return !vbus_above(cfg, 0 /* 420mv */);
+			res = vbus_above(cfg, 0 /* 420 mV */, &above);
+			return res == 0 && !above;
 		case TC_VBUS_PRESENT:
-			return vbus_above(cfg, 10 /* 4620mV */);
+			res = vbus_above(cfg, 10 /* 4620 mV */, &above);
+			return res == 0 && above;
 		case TC_VBUS_REMOVED:
-			return !vbus_above(cfg, 7 /* 3360mV */);
+			res = vbus_above(cfg, 7 /* 3360 mV */, &above);
+			return res == 0 && !above;
 		default:
 			LOG_ERR("Invalid value for tc_vbus_level: %d", level);
 			break;
@@ -158,28 +175,33 @@ bool fusb302_check_vbus_level(const struct device *dev, enum tc_vbus_level level
 
 int fusb302_measure_vbus(const struct device *dev, int *meas) {
 	const struct fusb302b_cfg *cfg = dev->config;
+	uint8_t switches0 = 0;
+	uint8_t lower_bound = 0;
+	uint8_t upper_bound = 0b111111;
+	bool above;
+	int res;
 
 	LOG_WRN("Measuring VBUS exactly, this may be slow");
 
-	uint8_t switches0 = 0;
-
-	int res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
+	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
 
 	if (res != 0) { return -EIO; }
 
 	/* Set MEAS_CC bits to 0 */
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0x00000011);
+	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0b00000011);
 
 	if (res != 0) { return -EIO; }
 
-	uint8_t lower_bound = 0;
-	uint8_t upper_bound = 0b111111;
-
-	if (!vbus_above(cfg, lower_bound)) {
+	res = vbus_above(cfg, lower_bound, &above);
+	if (res != 0) { return -EIO; }
+	if (!above) {
 		*meas = vbus_level_to_mv(lower_bound);
 		return 0;
 	}
-	if (vbus_above(cfg, upper_bound)) {
+
+	res = vbus_above(cfg, upper_bound, &above);
+	if (res != 0) { return -EIO; }
+	if (above) {
 		*meas = vbus_level_to_mv(upper_bound);
 		return 0;
 	}
@@ -188,7 +210,9 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 	while ((upper_bound - lower_bound) > 1) {
 		uint8_t middle = (lower_bound + upper_bound) / 2;
 
-		if (vbus_above(cfg, middle)) {
+		res = vbus_above(cfg, middle, &above);
+		if (res != 0) { return -EIO; }
+		if (above) {
 			lower_bound = middle;
 		} else {
 			upper_bound = middle;
@@ -199,7 +223,6 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 	LOG_DBG("Measured VBUS at %dmV", *meas);
 
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, switches0);
-
 	if (res != 0) { return -EIO; }
 	return 0;
 }
