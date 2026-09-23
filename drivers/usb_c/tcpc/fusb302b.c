@@ -218,8 +218,6 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 	int restore_res;
 	int res;
 
-	LOG_WRN("Measuring VBUS exactly, this may be slow");
-
 	k_mutex_lock(&data->lock, K_FOREVER);
 
 	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
