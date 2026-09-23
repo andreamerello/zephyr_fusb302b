@@ -31,6 +31,9 @@ static const uint8_t REG_STATUS1 = 0x41;
 static const uint8_t REG_INTERRUPT = 0x42;
 static const uint8_t REG_FIFO = 0x43;
 
+#define INTERRUPTA_TXSENT BIT(2)
+#define INTERRUPTB_GCRCSENT BIT(0)
+
 static const uint8_t TX_TOKEN_TXON = 0xA1;
 static const uint8_t TX_TOKEN_SOP1 = 0x12;
 static const uint8_t TX_TOKEN_SOP2 = 0x13;
@@ -355,16 +358,29 @@ static void fusb302b_irq_work(struct k_work *work)
 {
 	struct fusb302b_data *data = CONTAINER_OF(work, struct fusb302b_data, irq_work);
 	const struct fusb302b_cfg *cfg = data->dev->config;
-	uint8_t dummy;
+	uint8_t interrupts[2];
+	int ret;
 
-	int ret = i2c_reg_read_byte_dt(&cfg->i2c, REG_INTERRUPTB, &dummy);
+	/*
+	 * Reading the interrupt registers clears the latched sources so we
+	 * perform a BURST read starting from REG_INTERRUPTA which also covers
+	 * REG_INTERRUPTB.
+	 * Actual content (i.e. TXSENT and GCRCSENT) are only checked here only
+	 * for diagnostics against spurious IRQs. We don't use them to make any
+	 * decision about the FIFO content because the chip can report them out
+	 * of order; we look at each RX FIFO entry and we classify the event.
+	 */
+	ret = i2c_burst_read_dt(&cfg->i2c, REG_INTERRUPTA, interrupts,
+				sizeof(interrupts));
 	if (ret < 0) {
 		LOG_ERR("Failure to clear IRQ: %d", ret);
 		return;
 	}
 
-	if (!dummy)
+	if (!(interrupts[0] & INTERRUPTA_TXSENT) &&
+	    !(interrupts[1] & INTERRUPTB_GCRCSENT)) {
 		LOG_ERR("Spurious IRQ");
+	}
 }
 
 static void fusb302b_isr(const struct device *dev, struct gpio_callback *cb,
@@ -375,8 +391,14 @@ static void fusb302b_isr(const struct device *dev, struct gpio_callback *cb,
 	struct fusb302b_data *data =
 		CONTAINER_OF(cb, struct fusb302b_data, gpio_cb);
 
+	/*
+	 * MSG_STATUS only wakes the TCPC stack so that it inspects the RX FIFO.
+	 * In case the RX FIFO contains a TXOK message, we will return "no RX
+	 * data" and we'll notify the TX OK event to the stack.
+	 */
 	atomic_set(&data->data_avail, 1);
-	data->alert_info.handler(data->dev, data->alert_info.data, TCPC_ALERT_MSG_STATUS);
+	data->alert_info.handler(data->dev, data->alert_info.data,
+				 TCPC_ALERT_MSG_STATUS);
 
 	k_work_submit(&data->irq_work);
 }
@@ -425,7 +447,12 @@ static int fusb302b_config_irq(const struct device *dev)
 	ret = gpio_pin_interrupt_configure_dt(&cfg->gpio_irq, GPIO_INT_EDGE_TO_ACTIVE);
 	if (ret != 0) { return -EIO; }
 
-	return i2c_reg_write_byte_dt(&cfg->i2c, REG_MASKB, 0);
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_MASKA,
+				    0xff & ~INTERRUPTA_TXSENT);
+	if (ret != 0) { return -EIO; }
+
+	return i2c_reg_write_byte_dt(&cfg->i2c, REG_MASKB,
+				     0xff & ~INTERRUPTB_GCRCSENT);
 }
 
 int fusb302b_init(const struct device *dev) {
@@ -685,9 +712,18 @@ static int fusb302b_get_rx_pending_msg(const struct device *dev, struct pd_msg *
 		LOG_HEXDUMP_DBG(buf->data, buf->len, "RX data:");
 	}
 
-	if (buf->len == 0 && buf->header.message_type == PD_CTRL_GOOD_CRC) {
+	/*
+	 * A zero-length payload identifies a control message, not necessarily a
+	 * GoodCRC.  The extended bit and message type confirm that this FIFO entry
+	 * acknowledges the previous transmission.  Consume it here without
+	 * returning it to TCPM as a received protocol message.
+	 */
+	if (buf->len == 0 && !buf->header.extended &&
+	    buf->header.message_type == PD_CTRL_GOOD_CRC) {
 		LOG_DBG("Received GoodCRC, sending TCPC_ALERT_TRANSMIT_MSG_SUCCESS");
-		data->alert_info.handler(dev, data->alert_info.data, TCPC_ALERT_TRANSMIT_MSG_SUCCESS);
+		data->alert_info.handler(dev, data->alert_info.data,
+					 TCPC_ALERT_TRANSMIT_MSG_SUCCESS);
+		return -ENODATA;
 	}
 
 	return buf->len + 2 /* header */;
