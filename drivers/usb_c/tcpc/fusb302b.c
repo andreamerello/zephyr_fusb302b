@@ -180,6 +180,7 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 	uint8_t lower_bound = 0;
 	uint8_t upper_bound = 0b111111;
 	bool above;
+	int restore_res;
 	int res;
 
 	LOG_WRN("Measuring VBUS exactly, this may be slow");
@@ -191,20 +192,20 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 	/* Set MEAS_CC bits to 0 */
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0b00000011);
 
-	if (res != 0) { return -EIO; }
+	if (res != 0) { goto restore_switches0; }
 
 	res = vbus_above(cfg, lower_bound, &above);
-	if (res != 0) { return -EIO; }
+	if (res != 0) { goto restore_switches0; }
 	if (!above) {
 		*meas = vbus_level_to_mv(lower_bound);
-		return 0;
+		goto restore_switches0;
 	}
 
 	res = vbus_above(cfg, upper_bound, &above);
-	if (res != 0) { return -EIO; }
+	if (res != 0) { goto restore_switches0; }
 	if (above) {
 		*meas = vbus_level_to_mv(upper_bound);
-		return 0;
+		goto restore_switches0;
 	}
 
 	/* Binary search VBUS voltage */
@@ -212,7 +213,7 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 		uint8_t middle = (lower_bound + upper_bound) / 2;
 
 		res = vbus_above(cfg, middle, &above);
-		if (res != 0) { return -EIO; }
+		if (res != 0) { goto restore_switches0; }
 		if (above) {
 			lower_bound = middle;
 		} else {
@@ -223,9 +224,14 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 	*meas = vbus_level_to_mv(upper_bound);
 	LOG_DBG("Measured VBUS at %dmV", *meas);
 
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, switches0);
-	if (res != 0) { return -EIO; }
-	return 0;
+restore_switches0:
+	restore_res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, switches0);
+	if (restore_res != 0) {
+		LOG_ERR("Error restoring switches0 register: %d", restore_res);
+		if (res == 0) { res = restore_res; }
+	}
+
+	return res == 0 ? 0 : -EIO;
 }
 
 int fusb302_reset(const struct device *dev) {
