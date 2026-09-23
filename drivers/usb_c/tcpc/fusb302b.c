@@ -114,6 +114,7 @@ int fusb302b_verify(const struct device *dev) {
 
 static int vbus_level_to_mv(uint8_t level) { return (level + 1) * 420; }
 
+/* data->lock must be held by the caller. */
 static int vbus_above(const struct fusb302b_cfg *cfg, uint8_t level, bool *above) {
 	uint8_t measure = 0;
 	uint8_t status0 = 0;
@@ -154,16 +155,19 @@ restore_measure:
 
 bool fusb302_check_vbus_level(const struct device *dev, enum tc_vbus_level level) {
 	const struct fusb302b_cfg *cfg = dev->config;
+	struct fusb302b_data *data = dev->data;
 	uint8_t switches0;
 	bool above;
 	bool result = false;
 	int restore_res;
 	int res;
 
+	k_mutex_lock(&data->lock, K_FOREVER);
+
 	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
 	if (res != 0) {
 		LOG_ERR("Error reading switches0 register: %d", res);
-		return false;
+		goto out;
 	}
 
 	/* VBUS measurement requires both MEAS_CC bits to be clear. */
@@ -199,11 +203,14 @@ restore_switches0:
 	}
 	if (res != 0 || restore_res != 0) { result = false; }
 
+out:
+	k_mutex_unlock(&data->lock);
 	return result;
 }
 
 int fusb302_measure_vbus(const struct device *dev, int *meas) {
 	const struct fusb302b_cfg *cfg = dev->config;
+	struct fusb302b_data *data = dev->data;
 	uint8_t switches0 = 0;
 	uint8_t lower_bound = 0;
 	uint8_t upper_bound = 0b111111;
@@ -213,9 +220,11 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 
 	LOG_WRN("Measuring VBUS exactly, this may be slow");
 
+	k_mutex_lock(&data->lock, K_FOREVER);
+
 	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
 
-	if (res != 0) { return -EIO; }
+	if (res != 0) { goto out; }
 
 	/* Set MEAS_CC bits to 0 */
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0,
@@ -260,18 +269,28 @@ restore_switches0:
 		if (res == 0) { res = restore_res; }
 	}
 
+out:
+	k_mutex_unlock(&data->lock);
 	return res == 0 ? 0 : -EIO;
 }
 
 int fusb302_reset(const struct device *dev) {
 	LOG_DBG("Resetting");
 	const struct fusb302b_cfg *cfg = dev->config;
+	struct fusb302b_data *data = dev->data;
+	int res;
+
+	k_mutex_lock(&data->lock, K_FOREVER);
 	/* SW_RES: "Reset the FUSB302B including the I2C registers to their default values" */
-	return i2c_reg_write_byte_dt(&cfg->i2c, REG_RESET, 0b00000001);
+	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_RESET, 0b00000001);
+	k_mutex_unlock(&data->lock);
+
+	return res;
 }
 
 enum cc_res { CC_RES_1, CC_RES_2, CC_RES_BOTH, CC_RES_NONE };
 
+/* data->lock must be held by the caller. */
 static int get_cc_line(const struct fusb302b_cfg *cfg, enum cc_res *out) {
 	/* Connect ADC to CC1 (set MEAS_CC1) */
 	int res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0b00000111);
@@ -416,6 +435,7 @@ int fusb302b_init(const struct device *dev) {
 	const struct fusb302b_cfg *cfg = dev->config;
 	struct fusb302b_data *data = dev->data;
 	data->dev = dev;
+	k_mutex_init(&data->lock);
 
 	if (!i2c_is_ready_dt(&cfg->i2c)) {
 		LOG_ERR("I2C driver not ready");
@@ -481,41 +501,50 @@ static int fusb302b_set_cc(const struct device *dev, enum tc_cc_pull cc_pull) {
 	LOG_DBG("Setting both CC to %s", cc_pull_to_str(cc_pull));
 
 	const struct fusb302b_cfg *cfg = dev->config;
+	struct fusb302b_data *data = dev->data;
+	uint8_t switches0;
+	int res = 0;
+
+	k_mutex_lock(&data->lock, K_FOREVER);
 
 	switch (cc_pull) {
 		case TC_CC_RA:
 			LOG_ERR("Ra not supported.");
-			return -ENOSYS;
-		case TC_CC_RP: {
+			res = -ENOSYS;
+			break;
+		case TC_CC_RP:
 			LOG_ERR("Rp not supported.");
-			return -ENOSYS;
-		}
-		case TC_CC_RD: {
-			uint8_t switches0 = 0;
-			int res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
-
-			if (res != 0) { return -EIO; }
+			res = -ENOSYS;
+			break;
+		case TC_CC_RD:
+			res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
+			if (res != 0) {
+				res = -EIO;
+				break;
+			}
 			switches0 |= 0b00000011; /* set PDWN1,2 */
 			switches0 &= 0b00111111; /* unset PU_EN1,2 */
 			res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, switches0);
-			if (res != 0) { return -EIO; }
+			if (res != 0) { res = -EIO; }
 			break;
-		}
-		case TC_CC_OPEN: {
-			uint8_t switches0 = 0;
-			int res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
-
-			if (res != 0) { return -EIO; }
+		case TC_CC_OPEN:
+			res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
+			if (res != 0) {
+				res = -EIO;
+				break;
+			}
 			switches0 &= 0b00111100;
 			res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, switches0);
-			if (res != 0) { return -EIO; }
+			if (res != 0) { res = -EIO; }
 			break;
-		}
 		case TC_RA_RD:
 			LOG_ERR("Ra + Rd not supported.");
-			return -ENOSYS;
+			res = -ENOSYS;
+			break;
 	}
-	return 0;
+
+	k_mutex_unlock(&data->lock);
+	return res;
 }
 
 static void fusb302b_set_vconn_discharge_cb(const struct device *dev, tcpc_vconn_discharge_cb_t cb) {}
@@ -525,14 +554,20 @@ static void fusb302b_set_vconn_cb(const struct device *dev, tcpc_vconn_control_c
 static int fusb302b_get_cc(const struct device *dev, enum tc_cc_voltage_state *cc1, enum tc_cc_voltage_state *cc2) {
 	const struct fusb302b_cfg *cfg = dev->config;
 	struct fusb302b_data *data = dev->data;
-
 	enum cc_res cc;
+	int res = 0;
+
+	k_mutex_lock(&data->lock, K_FOREVER);
+
 	if (data->cc != 0) {
 		cc = data->cc == 1 ? CC_RES_1 : CC_RES_2;
 	} else {
 		LOG_DBG("Measuring CC");
-		int res = get_cc_line(cfg, &cc);
-		if (res != 0) { return -EIO; }
+		res = get_cc_line(cfg, &cc);
+		if (res != 0) {
+			res = -EIO;
+			goto out;
+		}
 	}
 
 	switch (cc) {
@@ -558,7 +593,9 @@ static int fusb302b_get_cc(const struct device *dev, enum tc_cc_voltage_state *c
 			break;
 	}
 
-	return 0;
+out:
+	k_mutex_unlock(&data->lock);
+	return res;
 }
 
 /**
@@ -662,27 +699,33 @@ static int fusb302b_get_rx_pending_msg(const struct device *dev, struct pd_msg *
 
 int fusb302b_set_cc_polarity(const struct device *dev, enum tc_cc_polarity polarity) {
 	const struct fusb302b_cfg *cfg = dev->config;
+	struct fusb302b_data *data = dev->data;
 	/* Enable transmit driver for proper CC line */
 	uint8_t cc_select = (polarity == TC_POLARITY_CC1) ? 0b01 : 0b10;
+	int res;
 
 	LOG_INF("Setting CC polarity to %d", cc_select);
-	int res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES1, 0b00100100 | cc_select);
+	k_mutex_lock(&data->lock, K_FOREVER);
 
-	if (res != 0) { return -EIO; }
+	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES1, 0b00100100 | cc_select);
+
+	if (res != 0) { goto out; }
 
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0b00000011 | (cc_select << 2));
-	if (res != 0) { return -EIO; }
+	if (res != 0) { goto out; }
 
 	// Flush TX buffer
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_CONTROL0, 0x40);
-	if (res != 0) { return -EIO; }
+	if (res != 0) { goto out; }
 	// Flush RX buffer
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_CONTROL1, 0x04);
-	if (res != 0) { return -EIO; }
+	if (res != 0) { goto out; }
 	// Reset PD logic
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_RESET, 0x02);
-	if (res != 0) { return -EIO; }
-	return 0;
+
+out:
+	k_mutex_unlock(&data->lock);
+	return res == 0 ? 0 : -EIO;
 }
 
 int fusb302b_set_alert_handler_cb(const struct device *dev, tcpc_alert_handler_cb_t handler, void *alert_data) {

@@ -23,6 +23,8 @@ struct fusb302b_data {
 	struct alert_info alert_info;
 	struct gpio_callback gpio_cb;
 	struct k_work irq_work;
+	/* Serializes multi-register measurement and CC configuration. */
+	struct k_mutex lock;
 	int cc;
 	atomic_t data_avail;
 };
