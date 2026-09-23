@@ -737,37 +737,34 @@ int fusb302b_set_alert_handler_cb(const struct device *dev, tcpc_alert_handler_c
 int transmit_sop(const struct fusb302b_cfg *cfg, struct pd_msg *msg) {
 	__ASSERT_NO_MSG(msg->type == PD_PACKET_SOP);
 
-	if (msg->len > (48 - 2 - 5 - 4)) {
+	if (msg->len > (FUSB302_TX_BUFFER_SIZE - 2 - 5 - 4)) {
 		LOG_ERR("Packet too long");
 		return -ENOSYS;
 	}
 
-	uint8_t sop[5] = {TX_TOKEN_SOP1, TX_TOKEN_SOP1, TX_TOKEN_SOP1, TX_TOKEN_SOP2,
-					  TX_TOKEN_PACKSYM | ((msg->len + 2) & 0b00011111)};
-	LOG_HEXDUMP_DBG(sop, sizeof(sop), "SOP");
-	int res = i2c_burst_write_dt(&cfg->i2c, REG_FIFO, sop, sizeof(sop));
+	uint8_t fifo[FUSB302_TX_BUFFER_SIZE];
+	size_t pos = 0;
 
-	if (res != 0) { return -EIO; }
-
-	uint8_t header[2] = {msg->header.raw_value & 0xFF, msg->header.raw_value >> 8};
-
-	LOG_HEXDUMP_DBG(header, sizeof(header), "header");
-	res = i2c_burst_write_dt(&cfg->i2c, REG_FIFO, header, sizeof(header));
-	if (res != 0) { return -EIO; }
+	fifo[pos++] = TX_TOKEN_SOP1;
+	fifo[pos++] = TX_TOKEN_SOP1;
+	fifo[pos++] = TX_TOKEN_SOP1;
+	fifo[pos++] = TX_TOKEN_SOP2;
+	fifo[pos++] = TX_TOKEN_PACKSYM | ((msg->len + 2) & 0b00011111);
+	fifo[pos++] = msg->header.raw_value & 0xff;
+	fifo[pos++] = msg->header.raw_value >> 8;
 
 	if (msg->len > 0) {
-		LOG_HEXDUMP_DBG(msg->data, msg->len, "data");
-		res = i2c_burst_write_dt(&cfg->i2c, REG_FIFO, msg->data, msg->len);
-		if (res != 0) { return -EIO; }
+		memcpy(&fifo[pos], msg->data, msg->len);
+		pos += msg->len;
 	}
 
-	uint8_t eop[4] = {TX_TOKEN_JAM_CRC, TX_TOKEN_EOP, TX_TOKEN_TXOFF, TX_TOKEN_TXON};
+	fifo[pos++] = TX_TOKEN_JAM_CRC;
+	fifo[pos++] = TX_TOKEN_EOP;
+	fifo[pos++] = TX_TOKEN_TXOFF;
+	fifo[pos++] = TX_TOKEN_TXON;
 
-	LOG_HEXDUMP_DBG(eop, sizeof(eop), "EOP");
-	res = i2c_burst_write_dt(&cfg->i2c, REG_FIFO, eop, sizeof(eop));
-	if (res != 0) { return -EIO; }
-
-	return 0;
+	LOG_HEXDUMP_DBG(fifo, pos, "TX FIFO");
+	return i2c_burst_write_dt(&cfg->i2c, REG_FIFO, fifo, pos) == 0 ? 0 : -EIO;
 }
 
 int transmit_hard_reset(const struct fusb302b_cfg *cfg) {

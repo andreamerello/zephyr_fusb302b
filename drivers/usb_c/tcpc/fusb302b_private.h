@@ -12,6 +12,7 @@
 #include <zephyr/kernel.h>
 
 #define FUSB302_RX_BUFFER_SIZE 80
+#define FUSB302_TX_BUFFER_SIZE 48
 
 struct alert_info {
 	void *data;
