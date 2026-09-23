@@ -119,12 +119,50 @@ int fusb302b_verify(const struct device *dev) {
 static int vbus_level_to_mv(uint8_t level) { return (level + 1) * 420; }
 
 /* data->lock must be held by the caller. */
+static int fusb302b_get_switches0(const struct fusb302b_cfg *cfg,
+				  struct fusb302b_data *data, uint8_t *value)
+{
+	int res;
+
+	if (data->switches0_cache_valid) {
+		*value = data->switches0_cache;
+		return 0;
+	}
+
+	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, value);
+	if (res == 0) {
+		data->switches0_cache = *value;
+		data->switches0_cache_valid = true;
+	}
+
+	return res;
+}
+
+/* data->lock must be held by the caller. */
+static int fusb302b_set_switches0(const struct fusb302b_cfg *cfg,
+				  struct fusb302b_data *data, uint8_t value)
+{
+	int res;
+
+	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, value);
+	if (res == 0) {
+		data->switches0_cache = value;
+		data->switches0_cache_valid = true;
+	} else {
+		data->switches0_cache_valid = false;
+	}
+
+	return res;
+}
+
+/* data->lock must be held by the caller. */
 static int vbus_above(const struct fusb302b_cfg *cfg, uint8_t level, bool *above) {
 	uint8_t status0 = 0;
 	int res;
 
 	/* Set MEAS_VBUS to 1, to measure VBUS with the MDAC/comparator */
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_MEASURE, 0b01000000 | (level & 0b111111));
+	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_MEASURE,
+					    0b01000000 | (level & 0b111111));
 
 	if (res != 0) {
 		LOG_ERR("Error setting DAC to measure VBUS: %d", res);
@@ -156,15 +194,15 @@ bool fusb302_check_vbus_level(const struct device *dev, enum tc_vbus_level level
 
 	k_mutex_lock(&data->lock, K_FOREVER);
 
-	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
+	res = fusb302b_get_switches0(cfg, data, &switches0);
 	if (res != 0) {
 		LOG_ERR("Error reading switches0 register: %d", res);
 		goto out;
 	}
 
 	/* VBUS measurement requires both MEAS_CC bits to be clear. */
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0,
-				    switches0 & ~(BIT(2) | BIT(3)));
+	res = fusb302b_set_switches0(cfg, data,
+				     switches0 & ~(BIT(2) | BIT(3)));
 	if (res != 0) {
 		LOG_ERR("Error disabling CC measurement: %d", res);
 		goto restore_switches0;
@@ -196,7 +234,7 @@ bool fusb302_check_vbus_level(const struct device *dev, enum tc_vbus_level level
 	}
 
 restore_switches0:
-	restore_switches0_res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, switches0);
+	restore_switches0_res = fusb302b_set_switches0(cfg, data, switches0);
 	if (restore_switches0_res != 0) {
 		LOG_ERR("Error restoring switches0 register: %d", restore_switches0_res);
 	}
@@ -220,13 +258,13 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 
 	k_mutex_lock(&data->lock, K_FOREVER);
 
-	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
+	res = fusb302b_get_switches0(cfg, data, &switches0);
 
 	if (res != 0) { goto out; }
 
 	/* Set MEAS_CC bits to 0 */
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0,
-				    switches0 & ~(BIT(2) | BIT(3)));
+	res = fusb302b_set_switches0(cfg, data,
+				     switches0 & ~(BIT(2) | BIT(3)));
 
 	if (res != 0) { goto restore_switches0; }
 
@@ -269,7 +307,7 @@ restore_measure:
 	}
 
 restore_switches0:
-	restore_switches0_res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, switches0);
+	restore_switches0_res = fusb302b_set_switches0(cfg, data, switches0);
 	if (restore_switches0_res != 0) {
 		LOG_ERR("Error restoring switches0 register: %d", restore_switches0_res);
 		if (res == 0) { res = restore_switches0_res; }
@@ -289,6 +327,8 @@ int fusb302_reset(const struct device *dev) {
 	k_mutex_lock(&data->lock, K_FOREVER);
 	/* SW_RES: "Reset the FUSB302B including the I2C registers to their default values" */
 	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_RESET, 0b00000001);
+	data->switches0_cache_valid = false;
+
 	k_mutex_unlock(&data->lock);
 
 	return res;
@@ -297,9 +337,10 @@ int fusb302_reset(const struct device *dev) {
 enum cc_res { CC_RES_1, CC_RES_2, CC_RES_BOTH, CC_RES_NONE };
 
 /* data->lock must be held by the caller. */
-static int get_cc_line(const struct fusb302b_cfg *cfg, enum cc_res *out) {
+static int get_cc_line(const struct fusb302b_cfg *cfg, struct fusb302b_data *data,
+		       enum cc_res *out) {
 	/* Connect ADC to CC1 (set MEAS_CC1) */
-	int res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0b00000111);
+	int res = fusb302b_set_switches0(cfg, data, 0b00000111);
 	if (res != 0) { return -EIO; }
 	k_busy_wait(250);
 	/* Read voltage level BC_LVL */
@@ -309,7 +350,7 @@ static int get_cc_line(const struct fusb302b_cfg *cfg, enum cc_res *out) {
 	if (res != 0) { return -EIO; }
 	uint8_t voltage_level_1 = status0 & 0b11;
 	/* Connect ADC to CC2 */
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0b00001011);
+	res = fusb302b_set_switches0(cfg, data, 0b00001011);
 	if (res != 0) { return -EIO; }
 	k_busy_wait(250);
 	/* Read voltage level BC_LVL */
@@ -547,24 +588,24 @@ static int fusb302b_set_cc(const struct device *dev, enum tc_cc_pull cc_pull) {
 			res = -ENOSYS;
 			break;
 		case TC_CC_RD:
-			res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
+			res = fusb302b_get_switches0(cfg, data, &switches0);
 			if (res != 0) {
 				res = -EIO;
 				break;
 			}
 			switches0 |= 0b00000011; /* set PDWN1,2 */
 			switches0 &= 0b00111111; /* unset PU_EN1,2 */
-			res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, switches0);
+			res = fusb302b_set_switches0(cfg, data, switches0);
 			if (res != 0) { res = -EIO; }
 			break;
 		case TC_CC_OPEN:
-			res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
+			res = fusb302b_get_switches0(cfg, data, &switches0);
 			if (res != 0) {
 				res = -EIO;
 				break;
 			}
 			switches0 &= 0b00111100;
-			res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, switches0);
+			res = fusb302b_set_switches0(cfg, data, switches0);
 			if (res != 0) { res = -EIO; }
 			break;
 		case TC_RA_RD:
@@ -593,7 +634,7 @@ static int fusb302b_get_cc(const struct device *dev, enum tc_cc_voltage_state *c
 		cc = data->cc == 1 ? CC_RES_1 : CC_RES_2;
 	} else {
 		LOG_DBG("Measuring CC");
-		res = get_cc_line(cfg, &cc);
+		res = get_cc_line(cfg, data, &cc);
 		if (res != 0) {
 			res = -EIO;
 			goto out;
@@ -748,7 +789,8 @@ int fusb302b_set_cc_polarity(const struct device *dev, enum tc_cc_polarity polar
 
 	if (res != 0) { goto out; }
 
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0b00000011 | (cc_select << 2));
+	res = fusb302b_set_switches0(cfg, data,
+				     0b00000011 | (cc_select << 2));
 	if (res != 0) { goto out; }
 
 	// Flush TX buffer

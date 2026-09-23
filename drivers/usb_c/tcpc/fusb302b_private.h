@@ -26,6 +26,8 @@ struct fusb302b_data {
 	struct k_work irq_work;
 	/* Serializes multi-register measurement and CC configuration. */
 	struct k_mutex lock;
+	uint8_t switches0_cache;
+	bool switches0_cache_valid;
 	int cc;
 	atomic_t data_avail;
 };
