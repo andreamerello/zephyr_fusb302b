@@ -632,7 +632,11 @@ static int fusb302b_get_rx_pending_msg(const struct device *dev, struct pd_msg *
 
 	uint8_t sop_token;
 
-	i2c_reg_read_byte_dt(&cfg->i2c, REG_FIFO, &sop_token);// TODO: Error handling
+	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_FIFO, &sop_token);
+	if (res != 0) {
+		LOG_ERR("Error while reading SOP token from FIFO");
+		return -EIO;
+	}
 	LOG_DBG("SOP token %#04x", sop_token);
 	/* First byte determines package type */
 	switch (sop_token >> 5) {
