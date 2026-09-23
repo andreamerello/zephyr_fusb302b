@@ -154,24 +154,52 @@ restore_measure:
 
 bool fusb302_check_vbus_level(const struct device *dev, enum tc_vbus_level level) {
 	const struct fusb302b_cfg *cfg = dev->config;
+	uint8_t switches0;
 	bool above;
+	bool result = false;
+	int restore_res;
 	int res;
+
+	res = i2c_reg_read_byte_dt(&cfg->i2c, REG_SWITCHES0, &switches0);
+	if (res != 0) {
+		LOG_ERR("Error reading switches0 register: %d", res);
+		return false;
+	}
+
+	/* VBUS measurement requires both MEAS_CC bits to be clear. */
+	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0,
+				    switches0 & ~(BIT(2) | BIT(3)));
+	if (res != 0) {
+		LOG_ERR("Error disabling CC measurement: %d", res);
+		goto restore_switches0;
+	}
 
 	switch (level) {
 		case TC_VBUS_SAFE0V:
 			res = vbus_above(cfg, 0 /* 420 mV */, &above);
-			return res == 0 && !above;
+			result = res == 0 && !above;
+			break;
 		case TC_VBUS_PRESENT:
 			res = vbus_above(cfg, 10 /* 4620 mV */, &above);
-			return res == 0 && above;
+			result = res == 0 && above;
+			break;
 		case TC_VBUS_REMOVED:
 			res = vbus_above(cfg, 7 /* 3360 mV */, &above);
-			return res == 0 && !above;
+			result = res == 0 && !above;
+			break;
 		default:
 			LOG_ERR("Invalid value for tc_vbus_level: %d", level);
 			break;
 	}
-	return false;
+
+restore_switches0:
+	restore_res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, switches0);
+	if (restore_res != 0) {
+		LOG_ERR("Error restoring switches0 register: %d", restore_res);
+	}
+	if (res != 0 || restore_res != 0) { result = false; }
+
+	return result;
 }
 
 int fusb302_measure_vbus(const struct device *dev, int *meas) {
@@ -190,7 +218,8 @@ int fusb302_measure_vbus(const struct device *dev, int *meas) {
 	if (res != 0) { return -EIO; }
 
 	/* Set MEAS_CC bits to 0 */
-	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0, 0b00000011);
+	res = i2c_reg_write_byte_dt(&cfg->i2c, REG_SWITCHES0,
+				    switches0 & ~(BIT(2) | BIT(3)));
 
 	if (res != 0) { goto restore_switches0; }
 
