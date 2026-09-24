@@ -1,5 +1,6 @@
 /*
  * Copyright 2023 Jonas Otto
+ * Copyright 2026 Istituto Italiano di Tecnologia, EDL Lab
  * SPDX-License-Identifier: Apache-2.0
  */
 
