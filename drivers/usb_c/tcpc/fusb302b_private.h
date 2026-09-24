@@ -29,6 +29,7 @@ struct fusb302b_data {
 	uint8_t switches0_cache;
 	bool switches0_cache_valid;
 	int cc;
+	atomic_t vbus_mv;
 	atomic_t data_avail;
 };
 

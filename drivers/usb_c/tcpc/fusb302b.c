@@ -33,7 +33,10 @@ static const uint8_t REG_FIFO = 0x43;
 
 #define INTERRUPTA_TXSENT BIT(2)
 #define INTERRUPTB_GCRCSENT BIT(0)
+#define INTERRUPT_VBUSOK BIT(7)
 #define MEASURE_CC_VALUE 0x31
+
+#define VBUS_PRESENT_MIN_MV 4620
 
 static const uint8_t TX_TOKEN_TXON = 0xA1;
 static const uint8_t TX_TOKEN_SOP1 = 0x12;
@@ -182,7 +185,9 @@ static int vbus_above(const struct fusb302b_cfg *cfg, uint8_t level, bool *above
 	return res;
 }
 
-bool fusb302_check_vbus_level(const struct device *dev, enum tc_vbus_level level) {
+static bool fusb302_check_vbus_level_direct(const struct device *dev,
+					     enum tc_vbus_level level)
+{
 	const struct fusb302b_cfg *cfg = dev->config;
 	struct fusb302b_data *data = dev->data;
 	uint8_t switches0;
@@ -243,6 +248,20 @@ restore_switches0:
 out:
 	k_mutex_unlock(&data->lock);
 	return result;
+}
+
+bool fusb302_check_vbus_level(const struct device *dev, enum tc_vbus_level level)
+{
+	const struct fusb302b_cfg *cfg = dev->config;
+	struct fusb302b_data *data = dev->data;
+	int vbus_mv;
+
+	/* I_VBUSOK only tracks the threshold used by TC_VBUS_PRESENT. */
+	if (!cfg->gpio_irq.port || level != TC_VBUS_PRESENT)
+		return fusb302_check_vbus_level_direct(dev, level);
+
+	vbus_mv = atomic_get(&data->vbus_mv);
+	return vbus_mv > VBUS_PRESENT_MIN_MV;
 }
 
 int fusb302_measure_vbus(const struct device *dev, int *meas) {
@@ -314,6 +333,8 @@ restore_switches0:
 	}
 
 out:
+	if (res == 0)
+		atomic_set(&data->vbus_mv, *meas);
 	k_mutex_unlock(&data->lock);
 	return res == 0 ? 0 : -EIO;
 }
@@ -405,12 +426,15 @@ static void fusb302b_irq_work(struct k_work *work)
 	struct fusb302b_data *data = CONTAINER_OF(work, struct fusb302b_data, irq_work);
 	const struct fusb302b_cfg *cfg = data->dev->config;
 	uint8_t interrupts[2];
+	uint8_t interrupt;
+	int vbus_mv;
 	int ret;
 
 	/*
 	 * Reading the interrupt registers clears the latched sources so we
 	 * perform a BURST read starting from REG_INTERRUPTA which also covers
 	 * REG_INTERRUPTB.
+	 * The INTERRUPT register is not contiguous and it is read separately.
 	 * Actual content (i.e. TXSENT and GCRCSENT) are only checked here only
 	 * for diagnostics against spurious IRQs. We don't use them to make any
 	 * decision about the FIFO content because the chip can report them out
@@ -423,7 +447,20 @@ static void fusb302b_irq_work(struct k_work *work)
 		return;
 	}
 
-	if (!(interrupts[0] & INTERRUPTA_TXSENT) &&
+	ret = i2c_reg_read_byte_dt(&cfg->i2c, REG_INTERRUPT, &interrupt);
+	if (ret < 0) {
+		LOG_ERR("Failure to clear IRQ: %d", ret);
+		return;
+	}
+
+	if (interrupt & INTERRUPT_VBUSOK) {
+		ret = fusb302_measure_vbus(data->dev, &vbus_mv);
+		if (ret < 0)
+			LOG_ERR("Failure to update VBUS cache: %d", ret);
+	}
+
+	if (!(interrupt & INTERRUPT_VBUSOK) &&
+	    !(interrupts[0] & INTERRUPTA_TXSENT) &&
 	    !(interrupts[1] & INTERRUPTB_GCRCSENT)) {
 		LOG_ERR("Spurious IRQ");
 	}
@@ -443,8 +480,10 @@ static void fusb302b_isr(const struct device *dev, struct gpio_callback *cb,
 	 * data" and we'll notify the TX OK event to the stack.
 	 */
 	atomic_set(&data->data_avail, 1);
-	data->alert_info.handler(data->dev, data->alert_info.data,
-				 TCPC_ALERT_MSG_STATUS);
+	if (data->alert_info.handler) {
+		data->alert_info.handler(data->dev, data->alert_info.data,
+					 TCPC_ALERT_MSG_STATUS);
+	}
 
 	k_work_submit(&data->irq_work);
 }
@@ -454,6 +493,7 @@ static int fusb302b_config_irq(const struct device *dev)
 	const struct fusb302b_cfg *cfg = dev->config;
 	struct fusb302b_data *data = dev->data;
 	uint8_t dummy;
+	int vbus_mv;
 	int ret;
 
 	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_MASK, 0xff);
@@ -497,8 +537,23 @@ static int fusb302b_config_irq(const struct device *dev)
 				    0xff & ~INTERRUPTA_TXSENT);
 	if (ret != 0) { return -EIO; }
 
-	return i2c_reg_write_byte_dt(&cfg->i2c, REG_MASKB,
-				     0xff & ~INTERRUPTB_GCRCSENT);
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_MASKB,
+				    0xff & ~INTERRUPTB_GCRCSENT);
+	if (ret != 0) { return -EIO; }
+
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, REG_MASK,
+				    0xff & ~INTERRUPT_VBUSOK);
+	if (ret != 0) { return -EIO; }
+
+	/*
+	 * Init the VBUS cache after IRQ on its change is enabled, not to loose
+	 * any transition that deserves a measure.
+	 */
+	ret = fusb302_measure_vbus(dev, &vbus_mv);
+	if (ret < 0)
+		LOG_ERR("Failed to initialize VBUS cache: %d", ret);
+
+	return ret;
 }
 
 int fusb302b_init(const struct device *dev) {
@@ -532,6 +587,7 @@ int fusb302b_init(const struct device *dev) {
 		return -EIO;
 	}
 
+	atomic_set(&data->vbus_mv, 0);
 	data->data_avail = ATOMIC_INIT(0);
 	ret = fusb302b_config_irq(dev);
 	if (ret < 0) {
@@ -810,8 +866,10 @@ out:
 int fusb302b_set_alert_handler_cb(const struct device *dev, tcpc_alert_handler_cb_t handler, void *alert_data) {
 	struct fusb302b_data *data = dev->data;
 
-	data->alert_info.handler = handler;
 	data->alert_info.data = alert_data;
+	__sync_synchronize();
+	data->alert_info.handler = handler;
+	__sync_synchronize();
 	return 0;
 }
 
